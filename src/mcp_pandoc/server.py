@@ -2,14 +2,23 @@ import pypandoc
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
+# from pydantic import AnyUrl # Not strictly used, can be removed if not needed elsewhere
 import mcp.server.stdio
 import os
 import asyncio
 from aiohttp import web
-import logging  # For better logging
+import logging
+from urllib.parse import urlparse
 
 # --- Configuration ---
 # These should ideally be set via environment variables for flexibility
+
+# CRITICAL: Print environment variables as Python sees them, very early.
+print(f"PYTHON SCRIPT STARTING: Attempting to read environment variables.")
+print(f"PYTHON SCRIPT: Raw MCP_PANDOC_SHARED_DIR: {os.environ.get('MCP_PANDOC_SHARED_DIR')}")
+print(f"PYTHON SCRIPT: Raw MCP_PANDOC_DOWNLOAD_BASE_URL: {os.environ.get('MCP_PANDOC_DOWNLOAD_BASE_URL')}")
+print(f"PYTHON SCRIPT: Raw MCP_PANDOC_HTTP_PORT: {os.environ.get('MCP_PANDOC_HTTP_PORT')}")
+
 # Default internal path inside the container where files will be stored for download
 SHARED_DOWNLOAD_INTERNAL_PATH = os.environ.get("MCP_PANDOC_SHARED_DIR", "/app/shared_downloads")
 # Base URL for constructing download links (e.g., http://localhost:8081/downloads or https://your-domain.com/downloads)
@@ -17,23 +26,30 @@ SHARED_DOWNLOAD_INTERNAL_PATH = os.environ.get("MCP_PANDOC_SHARED_DIR", "/app/sh
 DOWNLOAD_BASE_URL = os.environ.get("MCP_PANDOC_DOWNLOAD_BASE_URL", "http://localhost:8081/downloads")
 # Port for the internal HTTP server
 HTTP_SERVER_PORT = int(os.environ.get("MCP_PANDOC_HTTP_PORT", 8081))
+
+print(f"PYTHON SCRIPT: Effective SHARED_DOWNLOAD_INTERNAL_PATH: {SHARED_DOWNLOAD_INTERNAL_PATH}")
+print(f"PYTHON SCRIPT: Effective DOWNLOAD_BASE_URL: {DOWNLOAD_BASE_URL}")
+print(f"PYTHON SCRIPT: Effective HTTP_SERVER_PORT: {HTTP_SERVER_PORT}")
 # --- End Configuration ---
 
 # Ensure the shared download directory exists
 os.makedirs(SHARED_DOWNLOAD_INTERNAL_PATH, exist_ok=True)
 
 server = Server("mcp-pandoc")
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mcp-pandoc-server")
-logging.basicConfig(level=logging.INFO)
 
 
 async def start_http_server(app_runner):
     """Starts the aiohttp server."""
     await app_runner.setup()
-    site = web.TCPSite(app_runner, '0.0.0.0', HTTP_SERVER_PORT)
+    site = web.TCPSite(app_runner, '0.0.0.0', HTTP_SERVER_PORT)  # Listen on all interfaces inside container
     await site.start()
-    logger.info(f"HTTP server started on port {HTTP_SERVER_PORT}, serving from {SHARED_DOWNLOAD_INTERNAL_PATH}")
-    logger.info(f"Download links will be based on: {DOWNLOAD_BASE_URL}")
+    logger.info(f"HTTP server started on 0.0.0.0:{HTTP_SERVER_PORT}, serving static files.")
+    # This log message is crucial for debugging the download link construction
+    logger.info(f"Download links will be based on (DOWNLOAD_BASE_URL): {DOWNLOAD_BASE_URL}")
+    logger.info(f"Files are served from internal path: {SHARED_DOWNLOAD_INTERNAL_PATH}")
 
 
 async def cleanup_http_server(app_runner):
@@ -57,13 +73,13 @@ async def handle_list_tools() -> list[types.Tool]:
                 "🚨 CRITICAL REQUIREMENTS - PLEASE READ:\n"
                 "1. PDF Conversion:\n"
                 "   * You MUST install TeX Live BEFORE attempting PDF conversion:\n"
-                "   * Ubuntu/Debian: `sudo apt-get install texlive-xetex`\n"
+                "   * Ubuntu/Debian: `sudo apt-get install texlive-xetex texlive-fonts-recommended texlive-lang-chinese` (added Chinese support for TeX)\n"
                 "   * macOS: `brew install texlive`\n"
                 "   * Windows: Install MiKTeX or TeX Live from https://miktex.org/ or https://tug.org/texlive/\n"
                 "   * PDF conversion will FAIL without this installation\n\n"
                 "2. File Paths - EXPLICIT REQUIREMENTS:\n"
                 "   * When asked to save or convert to a file, you MUST provide:\n"
-                "     - Complete directory path (this will be used for the filename)\n"
+                "     - Complete directory path (this will be used for the filename if unique names are desired)\n"
                 "     - Filename\n"
                 "     - File extension\n"
                 "   * Example request: 'Write a story and save as PDF as /output/story.pdf'\n"
@@ -159,14 +175,14 @@ async def handle_call_tool(
     if name not in ["convert-contents"]:
         raise ValueError(f"Unknown tool: {name}")
 
-    logger.info(f"Received arguments: {arguments}")
+    logger.info(f"Received arguments for tool '{name}': {arguments}")
 
     if not arguments:
         raise ValueError("Missing arguments")
 
     contents = arguments.get("contents")
-    input_file_path = arguments.get("input_file")  # Path from user for input
-    user_specified_output_file = arguments.get("output_file")  # Path from user for output
+    input_file_path = arguments.get("input_file")
+    user_specified_output_file = arguments.get("output_file")
     output_format = arguments.get("output_format", "markdown").lower()
     input_format = arguments.get("input_format", "markdown").lower()
 
@@ -182,34 +198,54 @@ async def handle_call_tool(
     if output_format in ADVANCED_FORMATS and not user_specified_output_file:
         raise ValueError(f"output_file path is required for {output_format} format to enable download.")
 
-    # This will be the actual path inside the container where the file is saved
     actual_output_path_in_container = None
     download_url = None
+    output_filename_for_url = None  # Store sanitized filename for URL
 
     if user_specified_output_file:
-        # Use only the filename part from the user's specified path for storage and link
-        output_filename = os.path.basename(user_specified_output_file)
-        if not output_filename:  # Handle cases like "output_file": "/some/path/"
+        # Use only the filename part from the user's specified path.
+        # This filename is used for storage in SHARED_DOWNLOAD_INTERNAL_PATH and for the download link.
+        output_filename_for_url = os.path.basename(user_specified_output_file)
+        if not output_filename_for_url:
             raise ValueError("output_file must include a filename and extension.")
-        actual_output_path_in_container = os.path.join(SHARED_DOWNLOAD_INTERNAL_PATH, output_filename)
-        download_url = f"{DOWNLOAD_BASE_URL.rstrip('/')}/{output_filename}"
+
+        # Ensure filename is safe for URL and filesystem (basic sanitation)
+        # For more robust sanitation, consider a library or more rules.
+        # This example primarily handles spaces by URL encoding later.
+        actual_output_path_in_container = os.path.join(SHARED_DOWNLOAD_INTERNAL_PATH, output_filename_for_url)
+
+        # Construct download URL. The filename part will be URL-encoded by the browser/client if it contains spaces or special chars.
+        # The DOWNLOAD_BASE_URL should already contain the necessary prefix like /downloads
+        download_url = f"{DOWNLOAD_BASE_URL.rstrip('/')}/{output_filename_for_url}"
+        logger.info(f"User specified output file: {user_specified_output_file}")
+        logger.info(f"Derived output filename for URL/storage: {output_filename_for_url}")
+        logger.info(f"Internal save path: {actual_output_path_in_container}")
+        logger.info(f"Constructed download URL: {download_url}")
 
     try:
         extra_args = []
+        # For PDF conversion, especially with CJK characters, xelatex is better.
+        # Ensure fonts are installed in the Docker image (e.g., Noto Sans CJK or other Chinese fonts)
         if output_format == "pdf":
             extra_args.extend([
                 "--pdf-engine=xelatex",
-                "-V", "geometry:margin=1in"
+                "-V", "geometry:margin=1in",
+                # Example: If you have a main CJK font installed and know its name
+                # "-V", "mainfont=Noto Sans CJK SC" # Or your specific font
+                # "-V", "monofont=Noto Sans Mono CJK SC"
+                # "-V", "sansfont=Noto Sans CJK SC"
             ])
+            # If input is markdown, add CJK support for pandoc's markdown parser
+            if input_format == "markdown":
+                extra_args.append("--from=markdown+east_asian_line_breaks")
 
-        converted_output_string = None  # To store string output if not saving to file
+        converted_output_string = None
 
         if input_file_path:
             if not os.path.exists(input_file_path):
                 raise ValueError(f"Input file not found: {input_file_path}")
-
+            logger.info(f"Converting from input file: {input_file_path}")
             if actual_output_path_in_container:
-                # Convert file to file (saved in shared download dir)
                 pypandoc.convert_file(
                     input_file_path,
                     output_format,
@@ -217,17 +253,16 @@ async def handle_call_tool(
                     extra_args=extra_args
                 )
                 logger.info(
-                    f"File successfully converted from {input_file_path} and saved to: {actual_output_path_in_container}")
+                    f"File successfully converted from '{input_file_path}' and saved to: {actual_output_path_in_container}")
             else:
-                # Convert file to string
                 converted_output_string = pypandoc.convert_file(
                     input_file_path,
                     output_format,
                     extra_args=extra_args
                 )
         else:  # contents must be provided
+            logger.info(f"Converting from direct content string (input format: {input_format})")
             if actual_output_path_in_container:
-                # Convert content to file (saved in shared download dir)
                 pypandoc.convert_text(
                     contents,
                     output_format,
@@ -237,7 +272,6 @@ async def handle_call_tool(
                 )
                 logger.info(f"Content successfully converted and saved to: {actual_output_path_in_container}")
             else:
-                # Convert content to string
                 converted_output_string = pypandoc.convert_text(
                     contents,
                     output_format,
@@ -245,7 +279,6 @@ async def handle_call_tool(
                     extra_args=extra_args
                 )
 
-        # Determine response
         if actual_output_path_in_container and download_url:
             notify_with_result = (
                 f"Content successfully converted. "
@@ -253,11 +286,11 @@ async def handle_call_tool(
                 f"(Internally saved at: {actual_output_path_in_container})"
             )
         elif converted_output_string is not None:
-            if not converted_output_string.strip():  # Check if output is empty or just whitespace
+            if not converted_output_string.strip():
                 logger.warning(f"Conversion resulted in empty output for format {output_format}")
                 notify_with_result = (
                     f"Conversion to {output_format} resulted in empty content. "
-                    "This might be expected for some format combinations or indicate an issue."
+                    "This might be expected or indicate an issue (e.g., missing fonts for PDF with CJK)."
                 )
             else:
                 notify_with_result = (
@@ -267,96 +300,92 @@ async def handle_call_tool(
                     f'Converted Contents:\n\n{converted_output_string}'
                 )
         else:
-            # This case should ideally not be reached if logic is correct
             raise ValueError("Conversion process completed but no output (file or string) was generated.")
 
-        return [
-            types.TextContent(
-                type="text",
-                text=notify_with_result
-            )
-        ]
+        return [types.TextContent(type="text", text=notify_with_result)]
 
     except Exception as e:
         error_msg = f"Error converting {'file ' + input_file_path if input_file_path else 'contents'} from {input_format} to {output_format}: {str(e)}"
-        logger.error(error_msg, exc_info=True)
+        logger.error(error_msg, exc_info=True)  # Log full traceback
         raise ValueError(error_msg)
 
 
 async def main():
-    # Setup aiohttp app for serving files
-    http_app = web.Application()
-    # Serve files from the SHARED_DOWNLOAD_INTERNAL_PATH under the '/downloads' route prefix,
-    # but the DOWNLOAD_BASE_URL already includes '/downloads', so we serve from root of shared path
-    # The URL structure will be DOWNLOAD_BASE_URL/<filename>
-    # For aiohttp's add_static, the first argument is the URL prefix,
-    # the second is the directory path.
-    # If DOWNLOAD_BASE_URL is http://host:port/myfiles, and files are filename.pdf,
-    # then add_static('/myfiles', SHARED_DOWNLOAD_INTERNAL_PATH)
-    # Our DOWNLOAD_BASE_URL includes the prefix, so client constructs URL like DOWNLOAD_BASE_URL/filename.ext
-    # The http server here serves from SHARED_DOWNLOAD_INTERNAL_PATH at its root.
-    # The client will construct the full URL like DOWNLOAD_BASE_URL/filename.pdf
-    # The important part is that whatever comes after DOWNLOAD_BASE_URL in the link
-    # must match the file structure within SHARED_DOWNLOAD_INTERNAL_PATH.
-    # Given DOWNLOAD_BASE_URL = "http://localhost:8081/downloads"
-    # And file is "report.pdf" in SHARED_DOWNLOAD_INTERNAL_PATH
-    # Link will be "http://localhost:8081/downloads/report.pdf"
-    # aiohttp needs to serve SHARED_DOWNLOAD_INTERNAL_PATH at the prefix /downloads
+    logger.info(f"MCP Pandoc Server starting up...")
+    logger.info(f"Using DOWNLOAD_BASE_URL: {DOWNLOAD_BASE_URL}")
+    logger.info(f"Serving files from internal path: {SHARED_DOWNLOAD_INTERNAL_PATH} on port {HTTP_SERVER_PORT}")
 
-    # Extract path component from DOWNLOAD_BASE_URL if it has one
-    from urllib.parse import urlparse
+    http_app = web.Application()
+
+    # Determine the route prefix for serving static files from DOWNLOAD_BASE_URL
+    # Example: DOWNLOAD_BASE_URL = "http://172.191.18.52:8087/downloads"
+    # parsed_base_url.path will be "/downloads"
+    # This path is what aiohttp will use as its route prefix.
     parsed_base_url = urlparse(DOWNLOAD_BASE_URL)
     http_server_route_prefix = parsed_base_url.path.rstrip('/')
-    if not http_server_route_prefix:  # If base URL is just http://host:port
-        http_server_route_prefix = '/'  # Serve from root, this is unlikely desired for downloads
-        # Better to enforce a path like /downloads in DOWNLOAD_BASE_URL
+    if not http_server_route_prefix:  # If DOWNLOAD_BASE_URL is like http://host:port (no path)
+        # This case means files are served at the root of the HTTP server.
+        # The download link would be http://host:port/filename.pdf
+        # And aiohttp serves SHARED_DOWNLOAD_INTERNAL_PATH at '/'
+        http_server_route_prefix = '/'
+        logger.warning(
+            "DOWNLOAD_BASE_URL does not specify a path prefix (e.g., /downloads). "
+            "Files will be served from HTTP server root. "
+            f"Ensure '{DOWNLOAD_BASE_URL}' is accessible and correctly points to where files will be."
+        )
+    else:
+        logger.info(f"HTTP server will serve files under the route prefix: '{http_server_route_prefix}'")
 
-    if http_server_route_prefix == '/':
-        logger.warning("DOWNLOAD_BASE_URL does not specify a path prefix (e.g., /downloads). "
-                       "Serving files from HTTP server root. This might not be ideal.")
-
-    # Example: DOWNLOAD_BASE_URL = "http://localhost:8081/some/prefix"
-    # http_server_route_prefix will be "/some/prefix"
-    # Files will be served from SHARED_DOWNLOAD_INTERNAL_PATH at this prefix.
-    # So, SHARED_DOWNLOAD_INTERNAL_PATH/file.txt will be accessible at http://localhost:8081/some/prefix/file.txt
-    http_app.router.add_static(http_server_route_prefix if http_server_route_prefix != "/" else "/",
-                               SHARED_DOWNLOAD_INTERNAL_PATH,
-                               show_index=True,  # For debugging, can be False
-                               follow_symlinks=True)  # Be cautious with symlinks
+    # Setup static file serving
+    # Files in SHARED_DOWNLOAD_INTERNAL_PATH will be accessible via:
+    # <protocol>://<host>:<port><http_server_route_prefix>/<filename>
+    # This must match the structure of DOWNLOAD_BASE_URL
+    http_app.router.add_static(
+        prefix=http_server_route_prefix,
+        path=SHARED_DOWNLOAD_INTERNAL_PATH,
+        show_index=True,  # Helpful for debugging, list files if index.html not found
+        follow_symlinks=True  # Be cautious with symlinks if any are used
+    )
+    logger.info(
+        f"aiohttp static route configured: prefix='{http_server_route_prefix}', path='{SHARED_DOWNLOAD_INTERNAL_PATH}'")
 
     app_runner = web.AppRunner(http_app)
-
-    # Start HTTP server as a background task
     http_server_task = asyncio.create_task(start_http_server(app_runner))
 
     try:
-        # Run the MCP server using stdin/stdout streams
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
             await server.run(
                 read_stream,
                 write_stream,
                 InitializationOptions(
                     server_name="mcp-pandoc",
-                    server_version="0.2.0",  # Version bump
+                    server_version="0.2.1",  # Version bump
                     capabilities=server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
                     ),
                 ),
             )
+    except Exception as e:
+        logger.critical(f"MCP server run failed: {e}", exc_info=True)
     finally:
-        # Cleanup HTTP server
+        logger.info("MCP Pandoc Server shutting down...")
         await cleanup_http_server(app_runner)
-        if http_server_task:
-            http_server_task.cancel()  # Request cancellation
+        if http_server_task and not http_server_task.done():
+            http_server_task.cancel()
             try:
-                await http_server_task  # Wait for task to finish (or raise CancelledError)
+                await http_server_task
             except asyncio.CancelledError:
-                logger.info("HTTP server task cancelled.")
+                logger.info("HTTP server task successfully cancelled.")
+            except Exception as e_cancel:
+                logger.error(f"Error during HTTP server task cancellation: {e_cancel}", exc_info=True)
+        logger.info("Shutdown complete.")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("MCP Pandoc server shutting down...")
+        logger.info("Process interrupted by user (KeyboardInterrupt).")
+    except Exception as e_global:
+        logger.critical(f"Unhandled exception in __main__: {e_global}", exc_info=True)
