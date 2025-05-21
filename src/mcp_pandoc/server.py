@@ -10,31 +10,6 @@ from aiohttp import web
 import logging
 from urllib.parse import urlparse
 
-# --- Configuration ---
-# These should ideally be set via environment variables for flexibility
-
-# CRITICAL: Print environment variables as Python sees them, very early.
-print(f"PYTHON SCRIPT STARTING: Attempting to read environment variables.")
-print(f"PYTHON SCRIPT: Raw MCP_PANDOC_SHARED_DIR: {os.environ.get('MCP_PANDOC_SHARED_DIR')}")
-print(f"PYTHON SCRIPT: Raw MCP_PANDOC_DOWNLOAD_BASE_URL: {os.environ.get('MCP_PANDOC_DOWNLOAD_BASE_URL')}")
-print(f"PYTHON SCRIPT: Raw MCP_PANDOC_HTTP_PORT: {os.environ.get('MCP_PANDOC_HTTP_PORT')}")
-
-# Default internal path inside the container where files will be stored for download
-SHARED_DOWNLOAD_INTERNAL_PATH = os.environ.get("MCP_PANDOC_SHARED_DIR", "/app/shared_downloads")
-# Base URL for constructing download links (e.g., http://localhost:8081/downloads or https://your-domain.com/downloads)
-# This needs to be the URL through which the client can reach the HTTP server
-DOWNLOAD_BASE_URL = os.environ.get("MCP_PANDOC_DOWNLOAD_BASE_URL", "http://localhost:8081/downloads")
-# Port for the internal HTTP server
-HTTP_SERVER_PORT = int(os.environ.get("MCP_PANDOC_HTTP_PORT", 8081))
-
-print(f"PYTHON SCRIPT: Effective SHARED_DOWNLOAD_INTERNAL_PATH: {SHARED_DOWNLOAD_INTERNAL_PATH}")
-print(f"PYTHON SCRIPT: Effective DOWNLOAD_BASE_URL: {DOWNLOAD_BASE_URL}")
-print(f"PYTHON SCRIPT: Effective HTTP_SERVER_PORT: {HTTP_SERVER_PORT}")
-# --- End Configuration ---
-
-# Ensure the shared download directory exists
-os.makedirs(SHARED_DOWNLOAD_INTERNAL_PATH, exist_ok=True)
-
 server = Server("mcp-pandoc")
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -311,6 +286,16 @@ async def handle_call_tool(
 
 
 async def main():
+    # Default internal path inside the container where files will be stored for download
+    SHARED_DOWNLOAD_INTERNAL_PATH = os.environ.get("MCP_PANDOC_SHARED_DIR", "/app/shared_downloads")
+    # Base URL for constructing download links (e.g., http://localhost:8081/downloads or https://your-domain.com/downloads)
+    # This needs to be the URL through which the client can reach the HTTP server
+    DOWNLOAD_BASE_URL = os.environ.get("MCP_PANDOC_DOWNLOAD_BASE_URL", "http://localhost:8081/downloads")
+    # Port for the internal HTTP server
+    HTTP_SERVER_PORT = int(os.environ.get("MCP_PANDOC_HTTP_PORT", 8081))
+    
+    # Ensure the shared download directory exists
+    os.makedirs(SHARED_DOWNLOAD_INTERNAL_PATH, exist_ok=True)
     logger.info(f"MCP Pandoc Server starting up...")
     logger.info(f"Using DOWNLOAD_BASE_URL: {DOWNLOAD_BASE_URL}")
     logger.info(f"Serving files from internal path: {SHARED_DOWNLOAD_INTERNAL_PATH} on port {HTTP_SERVER_PORT}")
