@@ -10,6 +10,11 @@ from aiohttp import web
 import logging
 from urllib.parse import urlparse
 
+server = Server("mcp-pandoc")
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("mcp-pandoc-server")
+
 SHARED_DOWNLOAD_INTERNAL_PATH = os.environ.get("MCP_PANDOC_SHARED_DIR", "/app/shared_downloads")
 DOWNLOAD_BASE_URL = os.environ.get("MCP_PANDOC_DOWNLOAD_BASE_URL", "http://localhost:8081/downloads")
 HTTP_SERVER_PORT = int(os.environ.get("MCP_PANDOC_HTTP_PORT", 8081))
@@ -19,11 +24,6 @@ os.makedirs(SHARED_DOWNLOAD_INTERNAL_PATH, exist_ok=True)
 logger.info(f"MCP Pandoc Server starting up...")
 logger.info(f"Using DOWNLOAD_BASE_URL: {DOWNLOAD_BASE_URL}")
 logger.info(f"Serving files from internal path: {SHARED_DOWNLOAD_INTERNAL_PATH} on port {HTTP_SERVER_PORT}")
-
-server = Server("mcp-pandoc")
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("mcp-pandoc-server")
 
 
 async def start_http_server(app_runner):
