@@ -11,8 +11,7 @@ import logging  # For better logging
 # --- Configuration ---
 # These should ideally be set via environment variables for flexibility
 # Default internal path inside the container where files will be stored for download
-# SHARED_DOWNLOAD_INTERNAL_PATH = os.environ.get("MCP_PANDOC_SHARED_DIR", "/app/shared_downloads")
-SHARED_DOWNLOAD_INTERNAL_PATH = os.environ.get("MCP_PANDOC_SHARED_DIR", "/home/jasonzhou/shared_downloads")
+SHARED_DOWNLOAD_INTERNAL_PATH = os.environ.get("MCP_PANDOC_SHARED_DIR", "/app/shared_downloads")
 # Base URL for constructing download links (e.g., http://localhost:8081/downloads or https://your-domain.com/downloads)
 # This needs to be the URL through which the client can reach the HTTP server
 DOWNLOAD_BASE_URL = os.environ.get("MCP_PANDOC_DOWNLOAD_BASE_URL", "http://localhost:8081/downloads")
