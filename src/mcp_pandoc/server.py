@@ -130,25 +130,25 @@ async def handle_list_tools() -> list[types.Tool]:
                         )
                     }
                 },
-                "oneOf": [
-                    {"required": ["contents"]},
-                    {"required": ["input_file"]}
-                ],
-                "allOf": [
-                    {
-                        "if": {
-                            "properties": {
-                                "output_format": {
-                                    "enum": ["pdf", "docx", "rst", "latex", "epub"]
-                                }
-                            }
-                        },
-                        "then": {
-                            "required": ["output_file"]
-                        }
-                    }
-                ]
-            },
+                # "oneOf": [
+                #     {"required": ["contents"]},
+                #     {"required": ["input_file"]}
+                # ],
+                # "allOf": [
+                #     {
+                #         "if": {
+                #             "properties": {
+                #                 "output_format": {
+                #                     "enum": ["pdf", "docx", "rst", "latex", "epub"]
+                #                 }
+                #             }
+                #         },
+                #         "then": {
+                #             "required": ["output_file"]
+                #         }
+                #     }
+                # ]
+            }
         )
     ]
 
